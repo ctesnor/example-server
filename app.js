@@ -1,31 +1,77 @@
+// server.js
+
+const express = require('express');
+const mongoose = require('mongoose');
+require('dotenv').config();
+
+const app = express();
+
+// Middleware to parse JSON requests
+app.use(express.json());
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+})
+.then(() => {
+    console.log('Connected to MongoDB');
+})
+.catch((error) => {
+    console.error('MongoDB connection error:', error);
+});
+
+// Schema for single CtValue or ResultValue entry
+const itemSchema = new mongoose.Schema({
+    type: { type: String, required: true, enum: ['CtValue', 'ResultValue'] },
+    date: { type: String, required: true },
+    Sample: { type: String, required: true },
+    "HZV-1": { type: String, required: true },
+    "HZV-2": { type: String, required: true },
+}, { collection: 'liaison_mdx' });
+
+const Item = mongoose.model('Item', itemSchema);
+
+// Health check route
+app.get('/', (req, res) => {
+    console.log('GET / endpoint hit');
+    res.send('Server is up and running!');
+});
+
+// POST endpoint to save multiple CtValue and ResultValue items
 app.post('/liaison_mdx', async (req, res) => {
-    console.log('POST /liaison_mdx endpoint hit with body:', req.body);
+    console.log('Incoming request body:', JSON.stringify(req.body, null, 2));
 
     const { CtValues, ResultValues } = req.body;
 
     if (!CtValues && !ResultValues) {
-        return res.status(400).send({ error: 'Request body must contain CtValues and/or ResultValues arrays.' });
+        return res.status(400).send({ error: 'Request body must include CtValues and/or ResultValues arrays.' });
     }
 
-    // Helper function to validate items
-    function validateItemArray(arr, type) {
+    function validateItems(arr, type) {
         if (!Array.isArray(arr)) {
             return `${type} must be an array.`;
         }
-        for (const item of arr) {
-            if (typeof item !== 'object' || !item.date || !item.Sample || !item['HZV-1'] || !item['HZV-2']) {
-                return `Each item in ${type} array must be an object with date, Sample, HZV-1, and HZV-2 fields.`;
+        for (const [index, item] of arr.entries()) {
+            if (typeof item !== 'object' || item === null) {
+                return `Item at index ${index} in ${type} is not a valid object.`;
+            }
+            const requiredFields = ['date', 'Sample', 'HZV-1', 'HZV-2'];
+            for (const field of requiredFields) {
+                if (!(field in item) || typeof item[field] !== 'string' || item[field].trim() === '') {
+                    return `Field "${field}" missing or invalid in item at index ${index} of ${type}.`;
+                }
             }
         }
         return null;
     }
 
-    // Validate CtValues and ResultValues contents if present
-    let error = null;
-    if (CtValues) error = validateItemArray(CtValues, 'CtValues');
-    if (!error && ResultValues) error = validateItemArray(ResultValues, 'ResultValues');
+    // Validate CtValues if present
+    let error = CtValues ? validateItems(CtValues, 'CtValues') : null;
+    if (!error && ResultValues) error = validateItems(ResultValues, 'ResultValues');
     if (error) return res.status(400).send({ error });
 
+    // Prepare items with type field
     const itemsToInsert = [];
 
     if (CtValues) {
@@ -35,17 +81,19 @@ app.post('/liaison_mdx', async (req, res) => {
     }
 
     if (ResultValues) {
-        for (const resultValue of ResultValues) {
-            itemsToInsert.push({ ...resultValue, type: 'ResultValue' });
+        for (const resValue of ResultValues) {
+            itemsToInsert.push({ ...resValue, type: 'ResultValue' });
         }
     }
 
     try {
         const savedItems = await Item.insertMany(itemsToInsert);
-        console.log(`Saved ${savedItems.length} items to the database.`);
-        res.status(201).send(savedItems);
-    } catch (error) {
-        console.error('Error saving items:', error);
-        res.status(500).send({ error: 'Failed to save items to database.' });
+        console.log(`Successfully saved ${savedItems.length} items.`);
+        res.status(201).json(savedItems);
+    } catch (err) {
+        console.error('Error saving items:', err);
+        res.status(500).send({ error: 'Error saving items to database.' });
     }
 });
+
+module.exports = app;
