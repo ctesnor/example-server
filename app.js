@@ -12,6 +12,7 @@ const pool = mysql.createPool({
   user: process.env.MYSQL_USER || 'your-mysql-user',
   password: process.env.MYSQL_PASSWORD || 'your-mysql-password',
   database: process.env.MYSQL_DATABASE || 'your-mysql-database',
+  port: process.env.DB_PORT || 3306,
 });
 
 // Health check route
