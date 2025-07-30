@@ -1,61 +1,51 @@
-// server.js
-
-const express = require('express');
-const mongoose = require('mongoose');
-require('dotenv').config();
-
-const app = express();
-
-// Middleware to parse JSON requests
-app.use(express.json());
-
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-})
-.then(() => {
-    console.log('Connected to MongoDB');
-})
-.catch((error) => {
-    console.error('MongoDB connection error:', error);
-});
-
-// Schema for single CtValue or ResultValue entry
-const itemSchema = new mongoose.Schema({
-    type: { type: String, required: true, enum: ['CtValue', 'ResultValue'] },
-    date: String,
-    Sample: String,
-    "HZV-1": String,
-    "HZV-2": String,
-}, { collection: 'liaison_mdx' });
-
-const Item = mongoose.model('Item', itemSchema);
-
-// Health check route
-app.get('/', (req, res) => {
-    console.log('GET / endpoint hit');
-    res.send('Server is up and running!');
-});
-
-// POST endpoint to save single item (CtValue or ResultValue)
 app.post('/liaison_mdx', async (req, res) => {
     console.log('POST /liaison_mdx endpoint hit with body:', req.body);
 
-    // Validate the incoming object
-    if (!req.body.type || !['CtValue', 'ResultValue'].includes(req.body.type)) {
-        return res.status(400).send({ error: 'Invalid or missing "type" property. Must be "CtValue" or "ResultValue".' });
+    const { CtValues, ResultValues } = req.body;
+
+    if (!CtValues && !ResultValues) {
+        return res.status(400).send({ error: 'Request body must contain CtValues and/or ResultValues arrays.' });
+    }
+
+    // Helper function to validate items
+    function validateItemArray(arr, type) {
+        if (!Array.isArray(arr)) {
+            return `${type} must be an array.`;
+        }
+        for (const item of arr) {
+            if (typeof item !== 'object' || !item.date || !item.Sample || !item['HZV-1'] || !item['HZV-2']) {
+                return `Each item in ${type} array must be an object with date, Sample, HZV-1, and HZV-2 fields.`;
+            }
+        }
+        return null;
+    }
+
+    // Validate CtValues and ResultValues contents if present
+    let error = null;
+    if (CtValues) error = validateItemArray(CtValues, 'CtValues');
+    if (!error && ResultValues) error = validateItemArray(ResultValues, 'ResultValues');
+    if (error) return res.status(400).send({ error });
+
+    const itemsToInsert = [];
+
+    if (CtValues) {
+        for (const ctValue of CtValues) {
+            itemsToInsert.push({ ...ctValue, type: 'CtValue' });
+        }
+    }
+
+    if (ResultValues) {
+        for (const resultValue of ResultValues) {
+            itemsToInsert.push({ ...resultValue, type: 'ResultValue' });
+        }
     }
 
     try {
-        const newItem = new Item(req.body);
-        const savedItem = await newItem.save();
-        console.log('Saved new item to database:', savedItem);
-        res.status(201).send(savedItem);
+        const savedItems = await Item.insertMany(itemsToInsert);
+        console.log(`Saved ${savedItems.length} items to the database.`);
+        res.status(201).send(savedItems);
     } catch (error) {
-        console.error('Error saving item:', error);
-        res.status(400).send({ error: error.message });
+        console.error('Error saving items:', error);
+        res.status(500).send({ error: 'Failed to save items to database.' });
     }
 });
-
-module.exports = app;
