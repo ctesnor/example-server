@@ -65,7 +65,7 @@ function validateItems(arr, type, assayName) {
   return null;
 }
 
-// POST endpoint with VZV and HSV support
+// POST endpoint with VZV and HSV support and UPSERT logic based on "sample"
 app.post('/liaison_mdx', async (req, res, next) => {
   console.log('POST /liaison_mdx endpoint hit');
   console.log('Request body:', JSON.stringify(req.body, null, 2));
@@ -86,105 +86,102 @@ app.post('/liaison_mdx', async (req, res, next) => {
       return res.status(400).send({ error });
     }
 
-    const itemsToInsert = [];
+    const itemsToUpsert = [];
+
+    function prepareItem(type, item) {
+      if (AssayName && AssayName.includes('VZV')) {
+        return {
+          type,
+          date: item.date,
+          sample: item.Sample,
+          vzv: item.VZV || null,
+          hsv_1: null,
+          hsv_2: null,
+        };
+      } else if (AssayName && AssayName.includes('HSV')) {
+        return {
+          type,
+          date: item.date,
+          sample: item.Sample,
+          vzv: null,
+          hsv_1: item['HSV-1'] || null,
+          hsv_2: item['HSV-2'] || null,
+        };
+      } else {
+        return {
+          type,
+          date: item.date,
+          sample: item.Sample,
+          vzv: item.VZV || null,
+          hsv_1: item['HSV-1'] || null,
+          hsv_2: item['HSV-2'] || null,
+        };
+      }
+    }
 
     if (CtValues) {
       for (const ctValue of CtValues) {
-        if (AssayName && AssayName.includes('VZV')) {
-          itemsToInsert.push([
-            'CtValue',
-            ctValue.date,
-            ctValue.Sample,
-            ctValue.VZV || null,
-            null,
-            null,
-          ]);
-        } else if (AssayName && AssayName.includes('HSV')) {
-          itemsToInsert.push([
-            'CtValue',
-            ctValue.date,
-            ctValue.Sample,
-            null,
-            ctValue['HSV-1'] || null,
-            ctValue['HSV-2'] || null,
-          ]);
-        } else {
-          // fallback: insert what is available
-          itemsToInsert.push([
-            'CtValue',
-            ctValue.date,
-            ctValue.Sample,
-            ctValue.VZV || null,
-            ctValue['HSV-1'] || null,
-            ctValue['HSV-2'] || null,
-          ]);
-        }
+        itemsToUpsert.push(prepareItem('CtValue', ctValue));
       }
     }
 
     if (ResultValues) {
       for (const resValue of ResultValues) {
-        if (AssayName && AssayName.includes('VZV')) {
-          itemsToInsert.push([
-            'ResultValue',
-            resValue.date,
-            resValue.Sample,
-            resValue.VZV || null,
-            null,
-            null,
-          ]);
-        } else if (AssayName && AssayName.includes('HSV')) {
-          itemsToInsert.push([
-            'ResultValue',
-            resValue.date,
-            resValue.Sample,
-            null,
-            resValue['HSV-1'] || null,
-            resValue['HSV-2'] || null,
-          ]);
-        } else {
-          itemsToInsert.push([
-            'ResultValue',
-            resValue.date,
-            resValue.Sample,
-            resValue.VZV || null,
-            resValue['HSV-1'] || null,
-            resValue['HSV-2'] || null,
-          ]);
-        }
+        itemsToUpsert.push(prepareItem('ResultValue', resValue));
       }
     }
 
-    if (itemsToInsert.length === 0) {
-      console.warn('No valid items found to insert');
-      return res.status(400).send({ error: 'No valid items to insert.' });
+    if (itemsToUpsert.length === 0) {
+      console.warn('No valid items found to insert or update');
+      return res.status(400).send({ error: 'No valid items to insert or update.' });
     }
 
-    // Each row has 6 columns: type, date, sample, vzv, hsv_1, hsv_2
-    const values = [];
-    const placeholders = itemsToInsert.map((item, i) => {
-      const pos = i * 6;
-      values.push(...item);
-      return `($${pos + 1}, $${pos + 2}, $${pos + 3}, $${pos + 4}, $${pos + 5}, $${pos + 6})`;
-    }).join(', ');
+    // Start a transaction so all operations succeed/fail together
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    const sql = `INSERT INTO mdx_test ("type", "date", "sample", "vzv", "hsv_1", "hsv_2") VALUES ${placeholders} RETURNING *`;
+      const returnedRows = [];
 
-    const result = await pool.query(sql, values);
+      const upsertText = `
+        INSERT INTO mdx_test ("type", "date", "sample", "vzv", "hsv_1", "hsv_2")
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT ("sample") DO UPDATE
+          SET 
+            "type" = EXCLUDED."type",
+            "date" = EXCLUDED."date",
+            "vzv" = EXCLUDED.vzv,
+            "hsv_1" = EXCLUDED.hsv_1,
+            "hsv_2" = EXCLUDED.hsv_2
+        RETURNING *;
+      `;
 
-    console.log(`Successfully saved ${result.rowCount} items.`);
+      for (const item of itemsToUpsert) {
+        const { type, date, sample, vzv, hsv_1, hsv_2 } = item;
+        const result = await client.query(upsertText, [type, date, sample, vzv, hsv_1, hsv_2]);
+        returnedRows.push(result.rows[0]);
+      }
 
-    const savedItems = result.rows.map(row => ({
-      id: row.id,
-      type: row.type,
-      date: row.date,
-      Sample: row.sample,
-      VZV: row.vzv,
-      'HSV-1': row.hsv_1,
-      'HSV-2': row.hsv_2,
-    }));
+      await client.query('COMMIT');
 
-    res.status(201).json(savedItems);
+      const savedItems = returnedRows.map(row => ({
+        id: row.id,
+        type: row.type,
+        date: row.date,
+        Sample: row.sample,
+        VZV: row.vzv,
+        'HSV-1': row.hsv_1,
+        'HSV-2': row.hsv_2,
+      }));
+
+      console.log(`Successfully upserted ${savedItems.length} items.`);
+      res.status(201).json(savedItems);
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
   } catch (error) {
     console.error('Unexpected error in /liaison_mdx handler:', error);
